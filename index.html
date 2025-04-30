@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>五子棋人机对战</title>
+    <title>五子棋人机对战（攻防增强版）</title>
     <style>
         body {
             display: flex;
@@ -72,7 +72,7 @@
     </style>
 </head>
 <body>
-    <h1>五子棋人机对战</h1>
+    <h1>五子棋人机对战（攻防增强版）</h1>
     <div class="mode-buttons">
         <button class="mode-btn active" onclick="setMode('black')">执黑先行</button>
         <button class="mode-btn" onclick="setMode('white')">执白后行</button>
@@ -87,15 +87,338 @@
         const statusElement = document.getElementById('status');
         let currentPlayer = 'black';
         let gameOver = false;
-        let boardState = Array(boardSize).fill().map(() => Array(boardSize).fill(null));
+        let boardState = Array.from({length: boardSize}, () => Array(boardSize).fill(null));
         let humanSide = 'black';
         let aiThinking = false;
+
+        // AI参数
+        const MAX_THINK_TIME = 1500;
+        const WIN_SCORE = 1000000;
+        const patternWeights = {
+            FIVE: WIN_SCORE,
+            LIVE_FOUR: 500000,   // 提高活四权重
+            DORMANT_FOUR: 100000, // 提高眠四权重
+            LIVE_THREE: 5000,    // 提高活三权重
+            DORMANT_THREE: 1000,
+            LIVE_TWO: 200,
+            DORMANT_TWO: 50
+        };
+
+        class EnhancedGomokuAI {
+            constructor() {
+                this.cache = new Map();
+                this.startTime = 0;
+                this.bestMove = null;
+                this.defenseMoves = new Set();
+                this.attackMoves = new Set();
+            }
+
+            getBestMove(board) {
+                this.startTime = Date.now();
+                this.bestMove = null;
+                let depth = 1;
+                
+                while (depth <= 3 && !this.timeout()) {
+                    try {
+                        this.alphaBetaSearch(this.copyBoard(board), depth);
+                        depth++;
+                    } catch (e) {
+                        break;
+                    }
+                }
+                return this.bestMove || this.fallbackMove(board);
+            }
+
+            alphaBetaSearch(board, depth) {
+                let alpha = -Infinity;
+                let beta = Infinity;
+                const moves = this.genPriorityMoves(board);
+                
+                for (const [x, y] of moves) {
+                    if (this.timeout()) throw new Error('Timeout');
+                    
+                    const newBoard = this.copyBoard(board);
+                    newBoard[x][y] = 'white';
+                    const score = this.minimax(newBoard, depth-1, alpha, beta, false);
+                    
+                    if (score > alpha) {
+                        alpha = score;
+                        this.bestMove = [x, y];
+                    }
+                }
+            }
+
+            minimax(board, depth, alpha, beta, isMaximizing) {
+                if (this.timeout()) throw new Error('Timeout');
+                
+                const winner = this.quickEvaluate(board);
+                if (winner !== null) {
+                    return winner === 'white' ? WIN_SCORE : -WIN_SCORE;
+                }
+                if (depth === 0) return this.fastEvaluate(board);
+
+                const moves = this.genPriorityMoves(board);
+                let bestVal = isMaximizing ? -Infinity : Infinity;
+
+                for (const [x, y] of moves) {
+                    const newBoard = this.copyBoard(board);
+                    newBoard[x][y] = isMaximizing ? 'white' : 'black';
+                    const value = this.minimax(newBoard, depth-1, alpha, beta, !isMaximizing);
+
+                    if (isMaximizing) {
+                        bestVal = Math.max(bestVal, value);
+                        alpha = Math.max(alpha, value);
+                    } else {
+                        bestVal = Math.min(bestVal, value);
+                        beta = Math.min(beta, value);
+                    }
+                    
+                    if (beta <= alpha) break;
+                }
+
+                return bestVal;
+            }
+
+            genPriorityMoves(board) {
+                this.defenseMoves.clear();
+                this.attackMoves.clear();
+                
+                // 检测黑棋威胁（防御）
+                this.findThreats(board, 'black', 'defense');
+                // 检测白棋机会（进攻）
+                this.findThreats(board, 'white', 'attack');
+
+                const existingMoves = this.getExistingMoves(board);
+                const allMoves = new Set([...existingMoves, ...this.defenseMoves, ...this.attackMoves]);
+                
+                if (allMoves.size === 0) return [[7,7]];
+                
+                return Array.from(allMoves)
+                    .map(s => s.split(',').map(Number))
+                    .sort((a, b) => {
+                        const aAttack = this.attackMoves.has(`${a[0]},${a[1]}`) ? 0 : 1;
+                        const bAttack = this.attackMoves.has(`${b[0]},${b[1]}`) ? 0 : 1;
+                        const aDefense = this.defenseMoves.has(`${a[0]},${a[1]}`) ? 0 : 2;
+                        const bDefense = this.defenseMoves.has(`${b[0]},${b[1]}`) ? 0 : 2;
+                        
+                        return aAttack - bAttack || aDefense - bDefense || 
+                               this.positionValue(a) - this.positionValue(b);
+                    });
+            }
+
+            findThreats(board, targetColor, mode) {
+                for (let x = 0; x < 15; x++) {
+                    for (let y = 0; y < 15; y++) {
+                        if (board[x][y] === targetColor) {
+                            this.checkThreatsInAllDirections(board, x, y, targetColor, mode);
+                        }
+                    }
+                }
+            }
+
+            checkThreatsInAllDirections(board, x, y, color, mode) {
+                const directions = [[1,0],[0,1],[1,1],[1,-1]];
+                directions.forEach(([dx, dy]) => {
+                    let leftCount = 0, rightCount = 0;
+                    
+                    // 向右检查
+                    let cx = x + dx, cy = y + dy;
+                    while (cx >= 0 && cx < 15 && cy >= 0 && cy < 15 && board[cx][cy] === color) {
+                        rightCount++;
+                        cx += dx;
+                        cy += dy;
+                    }
+                    const rightOpen = cx >= 0 && cx < 15 && cy >= 0 && cy < 15 && !board[cx][cy];
+
+                    // 向左检查
+                    cx = x - dx;
+                    cy = y - dy;
+                    while (cx >= 0 && cx < 15 && cy >= 0 && cy < 15 && board[cx][cy] === color) {
+                        leftCount++;
+                        cx -= dx;
+                        cy -= dy;
+                    }
+                    const leftOpen = cx >= 0 && cx < 15 && cy >= 0 && cy < 15 && !board[cx][cy];
+
+                    const total = leftCount + rightCount + 1;
+
+                    // 进攻模式检测
+                    if (mode === 'attack' && color === 'white') {
+                        if (total === 4) {
+                            if (rightOpen) this.addAttackPoint(x + dx * (rightCount + 1), y + dy * (rightCount + 1));
+                            if (leftOpen) this.addAttackPoint(x - dx * (leftCount + 1), y - dy * (leftCount + 1));
+                        }
+                        if (total === 3) {
+                            if (leftOpen && rightOpen) {
+                                this.addAttackPoint(x + dx, y + dy);
+                                this.addAttackPoint(x - dx, y - dy);
+                            } else if (leftOpen) {
+                                this.addAttackPoint(x - dx * (leftCount + 1), y - dy * (leftCount + 1));
+                            } else if (rightOpen) {
+                                this.addAttackPoint(x + dx * (rightCount + 1), y + dy * (rightCount + 1));
+                            }
+                        }
+                    }
+
+                    // 防御模式检测
+                    if (mode === 'defense' && color === 'black') {
+                        if (total === 4) {
+                            if (rightOpen) this.addDefensePoint(x + dx * (rightCount + 1), y + dy * (rightCount + 1));
+                            if (leftOpen) this.addDefensePoint(x - dx * (leftCount + 1), y - dy * (leftCount + 1));
+                        }
+                        if (total === 3) {
+                            if (leftOpen && rightOpen) {
+                                this.addDefensePoint(x + dx, y + dy);
+                                this.addDefensePoint(x - dx, y - dy);
+                            } else if (leftOpen) {
+                                this.addDefensePoint(x - dx * (leftCount + 1), y - dy * (leftCount + 1));
+                            } else if (rightOpen) {
+                                this.addDefensePoint(x + dx * (rightCount + 1), y + dy * (rightCount + 1));
+                            }
+                        }
+                    }
+                });
+            }
+
+            addDefensePoint(x, y) {
+                if (x >=0 && x <15 && y >=0 && y <15 && !boardState[x][y]) {
+                    this.defenseMoves.add(`${x},${y}`);
+                }
+            }
+
+            addAttackPoint(x, y) {
+                if (x >=0 && x <15 && y >=0 && y <15 && !boardState[x][y]) {
+                    this.attackMoves.add(`${x},${y}`);
+                }
+            }
+
+            getExistingMoves(board) {
+                const moves = new Set();
+                for (let x=0; x<15; x++) {
+                    for (let y=0; y<15; y++) {
+                        if (board[x][y]) {
+                            for (let dx=-2; dx<=2; dx++) {
+                                for (let dy=-2; dy<=2; dy++) {
+                                    const nx = x+dx, ny = y+dy;
+                                    if (nx>=0 && nx<15 && ny>=0 && ny<15 && !board[nx][ny]) {
+                                        moves.add(`${nx},${ny}`);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                return moves;
+            }
+
+            positionValue([x,y]) {
+                const center = 7;
+                return Math.abs(x - center) + Math.abs(y - center);
+            }
+
+            fastEvaluate(board) {
+                let score = 0;
+                for (let x=0; x<15; x++) {
+                    for (let y=0; y<15; y++) {
+                        if (board[x][y]) {
+                            const isAI = board[x][y] === 'white';
+                            for (const dir of [[1,0],[0,1],[1,1],[1,-1]]) {
+                                const pattern = this.simplePatternCheck(board, x, y, dir);
+                                const value = patternWeights[pattern] || 0;
+                                score += isAI ? value : -value;
+                            }
+                        }
+                    }
+                }
+                return score;
+            }
+
+            simplePatternCheck(board, x, y, [dx, dy]) {
+                if (!board[x][y]) return null;
+                let count = 1;
+                let openEnds = 0;
+
+                // 正向检查
+                let cx = x + dx, cy = y + dy;
+                while (cx >=0 && cx <15 && cy >=0 && cy <15 && board[cx][cy] === board[x][y]) {
+                    count++;
+                    cx += dx;
+                    cy += dy;
+                }
+                if (cx >=0 && cx <15 && cy >=0 && cy <15 && !board[cx][cy]) openEnds++;
+
+                // 反向检查
+                cx = x - dx;
+                cy = y - dy;
+                while (cx >=0 && cx <15 && cy >=0 && cy <15 && board[cx][cy] === board[x][y]) {
+                    count++;
+                    cx -= dx;
+                    cy -= dy;
+                }
+                if (cx >=0 && cx <15 && cy >=0 && cy <15 && !board[cx][cy]) openEnds++;
+
+                if (count >=5) return 'FIVE';
+                if (count ===4) return openEnds >0 ? 'DORMANT_FOUR' : null;
+                if (count ===3) return openEnds ===2 ? 'LIVE_THREE' : openEnds ===1 ? 'DORMANT_THREE' : null;
+                if (count ===2) return openEnds >=1 ? 'LIVE_TWO' : null;
+                return null;
+            }
+
+            quickEvaluate(board) {
+                for (let x=0; x<15; x++) {
+                    for (let y=0; y<15; y++) {
+                        if (board[x][y] && this.checkWin(board, x, y)) {
+                            return board[x][y];
+                        }
+                    }
+                }
+                return null;
+            }
+
+            checkWin(board, x, y) {
+                const directions = [[1,0],[0,1],[1,1],[1,-1]];
+                for (const [dx, dy] of directions) {
+                    let count = 1;
+                    for (let i=1; i<5; i++) {
+                        const nx = x + dx*i, ny = y + dy*i;
+                        if (nx<0||nx>=15||ny<0||ny>=15||board[nx][ny]!==board[x][y]) break;
+                        count++;
+                    }
+                    for (let i=1; i<5; i++) {
+                        const nx = x - dx*i, ny = y - dy*i;
+                        if (nx<0||nx>=15||ny<0||ny>=15||board[nx][ny]!==board[x][y]) break;
+                        count++;
+                    }
+                    if (count >=5) return true;
+                }
+                return false;
+            }
+
+            timeout() {
+                return Date.now() - this.startTime > MAX_THINK_TIME;
+            }
+
+            copyBoard(board) {
+                return board.map(row => [...row]);
+            }
+
+            fallbackMove(board) {
+                for (let x=0; x<15; x++) {
+                    for (let y=0; y<15; y++) {
+                        if (!board[x][y]) return [x,y];
+                    }
+                }
+                return [7,7];
+            }
+        }
+
+        const aiEngine = new EnhancedGomokuAI();
 
         // 初始化棋盘
         function initBoard() {
             boardElement.innerHTML = '';
-            for (let i = 0; i < boardSize; i++) {
-                for (let j = 0; j < boardSize; j++) {
+            for (let i=0; i<boardSize; i++) {
+                for (let j=0; j<boardSize; j++) {
                     const cell = document.createElement('div');
                     cell.className = 'cell';
                     cell.dataset.x = i;
@@ -106,7 +429,6 @@
             }
         }
 
-        // 点击处理
         function handleClick(e) {
             if (gameOver || aiThinking) return;
             if (currentPlayer !== humanSide) return;
@@ -116,15 +438,15 @@
             
             if (!boardState[x][y]) {
                 placePiece(x, y);
-                if (!gameOver) setTimeout(computerTurnCheck, 100);
+                if (!gameOver) setTimeout(computerTurnCheck, 50);
             }
         }
 
-        // 落子逻辑
         function placePiece(x, y) {
+            const cell = document.querySelector(`.cell[data-x='${x}'][data-y='${y}']`);
             const piece = document.createElement('div');
             piece.className = `piece ${currentPlayer}`;
-            document.querySelector(`[data-x='${x}'][data-y='${y}']`).appendChild(piece);
+            cell.appendChild(piece);
             boardState[x][y] = currentPlayer;
 
             if (checkWin(x, y)) {
@@ -136,64 +458,38 @@
             }
         }
 
-        // 电脑回合检查
         function computerTurnCheck() {
             if (!gameOver && currentPlayer !== humanSide) {
                 aiThinking = true;
-                setTimeout(computerMove, 500);
+                setTimeout(computerMove, 100);
             }
         }
 
-        // AI核心算法（邻近评分）
         function computerMove() {
-            const candidates = [];
-            
-            // 扫描全棋盘计算得分
-            for (let x = 0; x < boardSize; x++) {
-                for (let y = 0; y < boardSize; y++) {
-                    if (boardState[x][y]) continue;
-                    
-                    let score = 0;
-                    // 检查周围8格棋子
-                    for (let dx = -1; dx <= 1; dx++) {
-                        for (let dy = -1; dy <= 1; dy++) {
-                            const nx = x + dx, ny = y + dy;
-                            if (nx >=0 && nx <15 && ny >=0 && ny <15 && boardState[nx][ny]) {
-                                score += 10;
-                            }
-                        }
-                    }
-                    candidates.push({x, y, score});
-                }
-            }
-            
-            // 选择最高分位置
-            const bestMove = candidates.reduce((a,b) => a.score > b.score ? a : b, {score: -1});
-            placePiece(bestMove.x, bestMove.y);
+            const move = aiEngine.getBestMove(boardState);
+            if (move) placePiece(move[0], move[1]);
             aiThinking = false;
         }
 
-        // 胜利判断（同原版）
         function checkWin(x, y) {
             const directions = [[1,0],[0,1],[1,1],[1,-1]];
             for (const [dx, dy] of directions) {
                 let count = 1;
-                for (let i = 1; i < 5; i++) {
+                for (let i=1; i<5; i++) {
                     let nx = x + dx*i, ny = y + dy*i;
-                    if (nx >=0 && nx <15 && ny >=0 && ny <15 && boardState[nx][ny] === currentPlayer) count++;
-                    else break;
+                    if (nx<0||nx>=15||ny<0||ny>=15||boardState[nx][ny]!==currentPlayer) break;
+                    count++;
                 }
-                for (let i = 1; i < 5; i++) {
+                for (let i=1; i<5; i++) {
                     let nx = x - dx*i, ny = y - dy*i;
-                    if (nx >=0 && nx <15 && ny >=0 && ny <15 && boardState[nx][ny] === currentPlayer) count++;
-                    else break;
+                    if (nx<0||nx>=15||ny<0||ny>=15||boardState[nx][ny]!==currentPlayer) break;
+                    count++;
                 }
-                if (count >= 5) return true;
+                if (count >=5) return true;
             }
             return false;
         }
 
-        // 模式选择
         function setMode(side) {
             humanSide = side;
             document.querySelectorAll('.mode-btn').forEach(btn => btn.classList.remove('active'));
@@ -201,17 +497,15 @@
             resetGame();
         }
 
-        // 重置游戏
         function resetGame() {
-            boardState = Array(boardSize).fill().map(() => Array(boardSize).fill(null));
+            boardState = Array.from({length: boardSize}, () => Array(boardSize).fill(null));
             currentPlayer = 'black';
             gameOver = false;
             statusElement.textContent = '当前轮到：黑棋';
-            initBoard();
+            document.querySelectorAll('.piece').forEach(p => p.remove());
             if (humanSide !== currentPlayer) setTimeout(computerMove, 500);
         }
 
-        // 初始化
         initBoard();
     </script>
 </body>
